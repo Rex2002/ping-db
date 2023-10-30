@@ -2,6 +2,11 @@
     "sonarlint.pathToCompileCommands": "${workspaceFolder}/compile_commands.json",
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
     "cSpell.words": [
+        "icmphdr",
         "pckt"
-    ]
+    ],
+    "files.associations": {
+        "*.pl": "prolog",
+        "ip_icmp.h": "c"
+    }
 }

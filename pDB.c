@@ -73,8 +73,7 @@ void intHandler(int dummy)
 }
  
 // Performs a DNS lookup 
-char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con)
-{
+char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con){
     printf("\nResolving DNS..\n");
     struct hostent *host_entity;
     char *ip=(char*)malloc(NI_MAXHOST*sizeof(char));
@@ -93,13 +92,11 @@ char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con)
     (*addr_con).sin_port = htons (PORT_NO);
     (*addr_con).sin_addr.s_addr  = *(long*)host_entity->h_addr;
  
-    return ip;
-     
+    return ip;  
 }
  
 // Resolves the reverse lookup of the hostname
-char* reverse_dns_lookup(char *ip_addr)
-{
+char* reverse_dns_lookup(char *ip_addr){
     struct sockaddr_in temp_addr;    
     socklen_t len;
     char buf[NI_MAXHOST], *ret_buf;
@@ -118,6 +115,23 @@ char* reverse_dns_lookup(char *ip_addr)
     strcpy(ret_buf, buf);
     return ret_buf;
 }
+
+void prepPckt(struct ping_pkt* pckt, int *msg_count){
+    int i;
+    bzero(pckt, sizeof(*pckt));
+    
+    pckt->hdr.type = ICMP_ECHO;
+    pckt->hdr.un.echo.id = getpid();
+    sprintf(pckt->msg, "sending packet no > %i. STOP", (*msg_count));
+    for (i = 27; i < (int) sizeof(pckt->msg)-1; i++ )
+        pckt->msg[i] = i+70; 
+
+    pckt->msg[i] = 0;
+    printf("Packet: %s, Size: %lu \n", pckt->msg, sizeof(pckt->msg));
+    pckt->hdr.un.echo.sequence = (*msg_count)++;
+    pckt->hdr.checksum = checksum(&pckt, sizeof(pckt));
+};
+
 
 void printPcktMsg(char* msg, int size){
     for(int i = RESP_DATA_OFFSET; i < size; i++){
@@ -148,14 +162,11 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr,
     // set socket options at ip to TTL and value to 64,
     // change to what you want by setting ttl_val
     if (setsockopt(ping_sockfd, SOL_IP, IP_TTL, 
-               &ttl_val, sizeof(ttl_val)) != 0)
-    {
+               &ttl_val, sizeof(ttl_val)) != 0){
         printf("\nSetting socket optionsto TTL failed!\n");
         return;
     }
- 
-    else
-    {
+    else{
         printf("\nSocket set to TTL..\n");
     }
  
@@ -175,18 +186,19 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr,
         //send packet
         clock_gettime(CLOCK_MONOTONIC, &time_start);
         if(msg_count < 1) {
-            bzero(&pckt, sizeof(pckt));
+            //bzero(&pckt, sizeof(pckt));
          
-            pckt.hdr.type = ICMP_ECHO;
-            pckt.hdr.un.echo.id = getpid();
-            sprintf(pckt.msg, "sending packet no > %i. STOP", msg_count);
-            for ( i = 27; i < (int) sizeof(pckt.msg)-1; i++ )
-                pckt.msg[i] = i+70; 
+            //pckt.hdr.type = ICMP_ECHO;
+            //pckt.hdr.un.echo.id = getpid();
+            //sprintf(pckt.msg, "sending packet no > %i. STOP", msg_count);
+            //for ( i = 27; i < (int) sizeof(pckt.msg)-1; i++ )
+            //    pckt.msg[i] = i+70;
 
-            pckt.msg[i] = 0;
-            printf("Packet: %s, Size: %lu \n", pckt.msg, sizeof(pckt.msg));
-            pckt.hdr.un.echo.sequence = msg_count++;
-            pckt.hdr.checksum = checksum(&pckt, sizeof(pckt));
+            //pckt.msg[i] = 0;
+            //printf("Packet: %s, Size: %lu \n", pckt.msg, sizeof(pckt.msg));
+            //pckt.hdr.un.echo.sequence = msg_count++;
+            //pckt.hdr.checksum = checksum(&pckt, sizeof(pckt));
+            prepPckt(&pckt, &msg_count);
             if ( sendto(ping_sockfd, &pckt, sizeof(pckt), 0, (struct sockaddr*) ping_addr, sizeof(*ping_addr)) <= 0)
             {
                 printf("\nPacket Sending Failed!\n");
@@ -240,6 +252,8 @@ void send_ping(int ping_sockfd, struct sockaddr_in *ping_addr,
                 }
                 else{
                     printf("Resend package with message");
+                    prepPckt(&pckt, &msg_count);
+                    msg_count--;
                     printPcktMsg(pckt.msg, sizeof(pckt.msg));
                 }
             }
