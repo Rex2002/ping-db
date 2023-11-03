@@ -21,6 +21,9 @@
 
 #define PING_PKT_S 64
 #define PING_PKT_PAYLOAD_SIZE 37
+#define PKT_ID_SIZE 3
+#define PKT_PAYLOAD_SIZE 34
+#define RESPONSE_CONTENT_OFFSET 20
 #define PORT_NO 0 
 #define RECV_TIMEOUT 1 
 
@@ -33,6 +36,7 @@ struct ping_pkt{
 };
 typedef struct data_pkt{
     unsigned int id : 24;
+    int data_len;
     char *data;
 } data_pkt;
 typedef struct ping_pkt packet;
@@ -80,46 +84,57 @@ unsigned short checksum(void *b, int len)
     return result;
 }
 
-void dataPkt2char(data_pkt data_pkt, char *out_buf){
-    char id1 = data_pkt.id & 0xf00;
-    char id2 = data_pkt.id & 0x0f0;
-    char id3 = data_pkt.id & 0x00f;
-    if(strlen(data_pkt.data) > PING_PKT_PAYLOAD_SIZE - 3){
-        printf("invalid data packet detected: %s\n", data_pkt.data);
-        out_buf[0] = 0;
-    }
+int dataPkt2char(data_pkt data_pkt, char *out_buf){
+    char id1 = (data_pkt.id >> (8*0)) & 0xff;
+    char id2 = (data_pkt.id >> (8*1)) & 0xff;
+    char id3 = (data_pkt.id >> (8*2)) & 0xff;
     out_buf[0] = id1;
     out_buf[1] = id2;
     out_buf[2] = id3;
-    for(int i = 3; i < PING_PKT_PAYLOAD_SIZE; i++){
+    if(data_pkt.data_len > PING_PKT_PAYLOAD_SIZE - 3){
+        printf("invalid data packet detected: %s\n", data_pkt.data);
+        out_buf[3] = 0;
+        return 3;
+    }
+    printf("payload: %s, id1: %i, %i, %i\n", data_pkt.data, id1, id2, id3);
+    int i;
+    for(i = 3; i < data_pkt.data_len; i++){
         out_buf[i] = data_pkt.data[i-3];
     }
+    return i;
 }
 
-packet prepPckt(packet pckt, char *content, int *msg_count){
-    printf("prepping with message: %s\n", content);
-    printf("message size: %lu\n", strlen(content));
+void printPcktMsg(char* msg, int size){
+    int i = 0;
+    for(; i < 3; i++){
+        printf("%i", msg[i]);
+    }
+    for(; i < size; i++){
+        printf("%c", msg[i]);
+    }
+    printf("\n");
+}
+
+packet prepPckt(packet pckt, char *content, int content_len, int *msg_count){
+    printf("prepping with message: ");
+    printPcktMsg(content, content_len);
+    printf("message size: %i\n", content_len);
     int i;
     memset(&pckt, 0, sizeof(pckt));
     pckt.hdr.type = ICMP_ECHO;
     pckt.hdr.un.echo.id = getpid();
-    sprintf(pckt.msg, "%s", content);
-    for (i = strlen(content); i < (int) sizeof(pckt.msg)-1; i++ )
+    for(i = 0; i < content_len; i++){
+        pckt.msg[i] = content[i];
+    }
+    for (;i < (int) sizeof(pckt.msg)-1; i++ )
         pckt.msg[i] = i+70; 
 
     pckt.msg[i] = 0;
-    //printf("Packet: %s, Size: %lu \n", pckt.msg, sizeof(pckt.msg));
     pckt.hdr.un.echo.sequence = 1;
     pckt.hdr.checksum = checksum(&pckt, sizeof(pckt));
     return pckt;
 }
 
-void printPcktMsg(char* msg, int size){
-    for(int i = 0; i < size; i++){
-        printf("%c", msg[i]);
-    }
-    printf("\n");
-}
 
 void sendPing(int ping_sockfd, packet *pck, struct sockaddr_in *ping_addr){
     if(sendto(ping_sockfd, pck, sizeof(*pck), 0, (struct sockaddr*) ping_addr, sizeof(*ping_addr)) <= 0){
@@ -148,10 +163,11 @@ void pongPing(int ping_sockfd, packet *pck, struct sockaddr_in addrs[], int addr
     packet pckSend;
     struct timeval begin, end;
     sendPing(ping_sockfd, pck, addrs);
+    // input a list of packets, send all of them quickly, afterwards only use one buffer pck and work on resending them
     while(pingLoop){
         gettimeofday(&begin, 0);
         recvPing(ping_sockfd, pck);
-        pckSend = prepPckt(*pck, &(pck->msg)[20], 0);
+        pckSend = prepPckt(*pck, &(pck->msg)[RESPONSE_CONTENT_OFFSET], 36, 0);
         sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         usleep(1000000);
         gettimeofday(&end, 0);
@@ -167,7 +183,7 @@ int main(){
     struct timeval tv_out;
 
     packet pckt; 
-    data_pkt data = {0, "sending packet > 0 STOP"};
+    data_pkt data = {257, 24, "sending packet > 0 STOP"};
     char *targets[] = {"localhost", "yahoo.com", "google.com", "ekg-ahrensburg.de"}; 
     int target_len = sizeof(targets)/sizeof(targets[0]);
     struct sockaddr_in addr_cons[target_len];
@@ -202,12 +218,9 @@ int main(){
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,
                    (const char*)&tv_out, sizeof tv_out);
 
-    char dataChar[PING_PKT_PAYLOAD_SIZE];
-    dataPkt2char(data, dataChar);
-    printf("packed data char: %s\n", dataChar);
-    pckt = prepPckt(pckt, dataChar, &msg_count);
+    char data_char[PING_PKT_PAYLOAD_SIZE];
+    int data_len = dataPkt2char(data, data_char);
+    pckt = prepPckt(pckt, data_char, data_len, &msg_count);
     pongPing(sockfd, &pckt, addr_cons, target_len);
-    //sendPing(sockfd, &pckt , &addr_con);
-    //recvPing(sockfd, &pckt);
     exit(0);
 }
