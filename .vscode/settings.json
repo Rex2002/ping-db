@@ -3,7 +3,8 @@
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
     "cSpell.words": [
         "icmphdr",
-        "pckt"
+        "pckt",
+        "strcpsize"
     ],
     "files.associations": {
         "*.pl": "prolog",

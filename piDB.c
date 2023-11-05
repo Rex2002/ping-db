@@ -17,12 +17,13 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include "queue.c"
 
 
 #define PING_PKT_S 64
 #define PING_PKT_PAYLOAD_SIZE 37
 #define PKT_ID_SIZE 3
-#define PKT_PAYLOAD_SIZE 34
+#define PKT_PAYLOAD_SIZE 33
 #define RESPONSE_CONTENT_OFFSET 20
 #define PORT_NO 0 
 #define RECV_TIMEOUT 1 
@@ -30,16 +31,10 @@
 int pingLoop = 1;
 
 
-struct ping_pkt{
+typedef struct ping_pkt{
     struct icmphdr hdr;
     char msg[PING_PKT_S-sizeof(struct icmphdr)];
-};
-typedef struct data_pkt{
-    unsigned int id : 24;
-    int data_len;
-    char *data;
-} data_pkt;
-typedef struct ping_pkt packet;
+} packet;
 
 void intHandler(int dummy)
 {
@@ -98,10 +93,12 @@ int dataPkt2char(data_pkt data_pkt, char *out_buf){
     }
     printf("payload: %s, id1: %i, %i, %i\n", data_pkt.data, id1, id2, id3);
     int i;
-    for(i = 3; i < data_pkt.data_len; i++){
-        out_buf[i] = data_pkt.data[i-3];
+    //strlcpy( &out_buf[3], data_pkt.data, data_pkt.data_len-1); 
+    for(i = 0; i < data_pkt.data_len; i++){
+        out_buf[i+3] = data_pkt.data[i];
     }
-    return i;
+    printf("outbuf %s\n", &out_buf[3]);
+    return i+3;
 }
 
 void printPcktMsg(char* msg, int size){
@@ -115,7 +112,7 @@ void printPcktMsg(char* msg, int size){
     printf("\n");
 }
 
-packet prepPckt(packet pckt, char *content, int content_len, int *msg_count){
+packet prepPckt(packet pckt, char *content, int content_len){
     printf("prepping with message: ");
     printPcktMsg(content, content_len);
     printf("message size: %i\n", content_len);
@@ -127,14 +124,14 @@ packet prepPckt(packet pckt, char *content, int content_len, int *msg_count){
         pckt.msg[i] = content[i];
     }
     for (;i < (int) sizeof(pckt.msg)-1; i++ )
-        pckt.msg[i] = i+70; 
+        //pckt.msg[i] = i+70; 
+        pckt.msg[i] = 0;
 
     pckt.msg[i] = 0;
     pckt.hdr.un.echo.sequence = 1;
     pckt.hdr.checksum = checksum(&pckt, sizeof(pckt));
     return pckt;
 }
-
 
 void sendPing(int ping_sockfd, packet *pck, struct sockaddr_in *ping_addr){
     if(sendto(ping_sockfd, pck, sizeof(*pck), 0, (struct sockaddr*) ping_addr, sizeof(*ping_addr)) <= 0){
@@ -159,15 +156,30 @@ void recvPing(int ping_sockfd, packet *pck){
     }
 }
 
-void pongPing(int ping_sockfd, packet *pck, struct sockaddr_in addrs[], int addrs_len){
+void pongPing(int ping_sockfd, node_t *data_queue, struct sockaddr_in addrs[], int addrs_len){
     packet pckSend;
+    data_pkt pckVal;
+    int payload_len = 0;
+    int msg_count = 0;
+    char data_char[PING_PKT_PAYLOAD_SIZE];
+    while((pckVal = dequeue(&data_queue)).data_len){
+        printf("--------new dequeuing--------\n");
+        printf("dequeued data: %s with size %i\n", pckVal.data, pckVal.data_len);
+        payload_len = dataPkt2char(pckVal, data_char);
+        free(pckVal.data);
+        pckSend = prepPckt(pckSend, data_char, payload_len);
+        sendPing(ping_sockfd, &pckSend, addrs);
+        msg_count++;
+    }
     struct timeval begin, end;
-    sendPing(ping_sockfd, pck, addrs);
+    //sendPing(ping_sockfd, pck, addrs);
     // input a list of packets, send all of them quickly, afterwards only use one buffer pck and work on resending them
     while(pingLoop){
         gettimeofday(&begin, 0);
-        recvPing(ping_sockfd, pck);
-        pckSend = prepPckt(*pck, &(pck->msg)[RESPONSE_CONTENT_OFFSET], 36, 0);
+        printf("--------new ping loop iteration--------\n");
+        recvPing(ping_sockfd, &pckSend);
+        pckSend = prepPckt(pckSend, &pckSend.msg[RESPONSE_CONTENT_OFFSET], 36);
+        printf("prepped pck for sending \n");
         sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         usleep(1000000);
         gettimeofday(&end, 0);
@@ -176,15 +188,42 @@ void pongPing(int ping_sockfd, packet *pck, struct sockaddr_in addrs[], int addr
     }
 }
 
+node_t* initialDataQueue(char* text){
+    printf("called initial data queue \n");
+    node_t *head = NULL;
+    int text_len = strlen(text);
+    int id = 0, strcpsize = 0;
+    data_pkt tmp_pkt;
+    tmp_pkt.data = (char*) malloc(sizeof(char) * PKT_PAYLOAD_SIZE + 1);
+    if(tmp_pkt.data == 0){
+        printf("failed to allocate memory; \n");
+    }
+    printf("allocated mem for data\n");
+    while(text_len){
+        printf("-------------\n text_len: %i\n", text_len);
+        printf("current leftover payload: %s\n", text);
+        strcpsize = text_len >= PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE  : text_len ;
+        printf("strcpsize: %i\n", strcpsize);
+    
+        strlcpy(tmp_pkt.data, text, strcpsize+1);
+        printf("tmp_pkt.data: %s\n", tmp_pkt.data);
+        printf("strlen of copied text: %li \n", strlen(tmp_pkt.data));
+        tmp_pkt.data_len = strcpsize;
+        tmp_pkt.id = id++;
+        enqueue(&head, tmp_pkt);
+        text_len -= strcpsize;
+        text += strcpsize;
+    }
+    return head;
+}
+
 int main(){
     srand(0);
-    int sockfd, msg_count = 0, ttl_val = 64;
+    int sockfd, ttl_val = 64;
     
     struct timeval tv_out;
 
-    packet pckt; 
-    data_pkt data = {257, 24, "sending packet > 0 STOP"};
-    char *targets[] = {"localhost", "yahoo.com", "google.com", "ekg-ahrensburg.de"}; 
+    char *targets[] = {"localhost"}; //, "yahoo.com", "google.com", "ekg-ahrensburg.de"}; 
     int target_len = sizeof(targets)/sizeof(targets[0]);
     struct sockaddr_in addr_cons[target_len];
     char *ip_addrs[target_len];
@@ -192,7 +231,6 @@ int main(){
         ip_addrs[i] = dns_lookup(targets[i], &(addr_cons[i]));
         printf("resolved %s to %s\n", targets[i], *(ip_addrs + i));
     }
-
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if(sockfd < 0){
@@ -218,9 +256,10 @@ int main(){
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,
                    (const char*)&tv_out, sizeof tv_out);
 
-    char data_char[PING_PKT_PAYLOAD_SIZE];
-    int data_len = dataPkt2char(data, data_char);
-    pckt = prepPckt(pckt, data_char, data_len, &msg_count);
-    pongPing(sockfd, &pckt, addr_cons, target_len);
+
+    char* data_text = "this is a long text with more than 34 letters please be long";
+    node_t *data_queue = initialDataQueue(data_text);
+
+    pongPing(sockfd, data_queue, addr_cons, target_len);
     exit(0);
 }
