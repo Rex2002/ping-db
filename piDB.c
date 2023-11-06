@@ -1,7 +1,6 @@
 // cd /run/media/harka/0AA03EE9A03EDAC1/Users/Win10/Data/Programmierung/C/pDB/
 
 #define _DEFAULT_SOURCE
-#define _BSD_SOURCE
 #define _GNU_SOURCE
 
 
@@ -10,8 +9,9 @@
 #include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
+
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,7 +21,7 @@
 
 
 #define PING_PKT_S 64
-#define PING_PKT_PAYLOAD_SIZE 37
+#define PING_PKT_PAYLOAD_SIZE 36
 #define PKT_ID_SIZE 3
 #define PKT_PAYLOAD_SIZE 33
 #define RESPONSE_CONTENT_OFFSET 20
@@ -42,27 +42,7 @@ void intHandler(int dummy)
     pingLoop=0;
 }
 
-char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con){
-    printf("\nResolving DNS..\n");
-    struct hostent *host_entity;
-    char *ip=(char*)malloc(NI_MAXHOST*sizeof(char));
- 
-    if ((host_entity = gethostbyname(addr_host)) == NULL)
-    {
-        // No ip found for hostname
-        return NULL;
-    }
-     
-    //filling up address structure
-    strcpy(ip, inet_ntoa(*(struct in_addr *)
-                          host_entity->h_addr));
- 
-    (*addr_con).sin_family = host_entity->h_addrtype;
-    (*addr_con).sin_port = htons (PORT_NO);
-    (*addr_con).sin_addr.s_addr  = *(long*)host_entity->h_addr;
- 
-    return ip;  
-}
+#include "dns_lookup.c"
 
 unsigned short checksum(void *b, int len)
 {    unsigned short *buf = b;
@@ -79,26 +59,40 @@ unsigned short checksum(void *b, int len)
     return result;
 }
 
-int dataPkt2char(data_pkt data_pkt, char *out_buf){
-    char id1 = (data_pkt.id >> (8*0)) & 0xff;
-    char id2 = (data_pkt.id >> (8*1)) & 0xff;
-    char id3 = (data_pkt.id >> (8*2)) & 0xff;
+int dataPkt2char(data_pkt pkt, char *out_buf){
+    char id1 = (pkt.id >> (8*0)) & 0xff;
+    char id2 = (pkt.id >> (8*1)) & 0xff;
+    char id3 = (pkt.id >> (8*2)) & 0xff;
     out_buf[0] = id1;
     out_buf[1] = id2;
     out_buf[2] = id3;
-    if(data_pkt.data_len > PING_PKT_PAYLOAD_SIZE - 3){
-        printf("invalid data packet detected: %s\n", data_pkt.data);
+    if(pkt.data_len > PING_PKT_PAYLOAD_SIZE - 3){
+        printf("invalid data packet detected: %s\n", pkt.data);
         out_buf[3] = 0;
         return 3;
     }
-    printf("payload: %s, id1: %i, %i, %i\n", data_pkt.data, id1, id2, id3);
+    printf("payload: %s, id1: %i, %i, %i\n", pkt.data, id1, id2, id3);
     int i;
-    //strlcpy( &out_buf[3], data_pkt.data, data_pkt.data_len-1); 
-    for(i = 0; i < data_pkt.data_len; i++){
-        out_buf[i+3] = data_pkt.data[i];
+    //strlcpy( &out_buf[3], pkt.data, pkt.data_len-1); 
+    for(i = 0; i < pkt.data_len; i++){
+        out_buf[i+3] = pkt.data[i];
     }
     printf("outbuf %s\n", &out_buf[3]);
     return i+3;
+}
+
+void char2dataPkt(char *in, data_pkt* pkt){
+    pkt->id = in[0] | in[1] << (8*1) | in[2] << (8*2);
+    printf("decrypted id: %i\n", pkt->id);
+    pkt->data_len = strlen(&in[3]) > PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE : strlen(&in[3]);
+    int k = 3;
+    while(in[k]){
+        printf("%c, %i\n", in[k], in[k]);
+        k++;
+    }
+    printf("data[3]: %s\n", &in[3]);
+    pkt->data = strdup(in+3);
+    printf("datalen: %i, data: %s\n", pkt->data_len, pkt->data);
 }
 
 void printPcktMsg(char* msg, int size){
@@ -178,7 +172,11 @@ void pongPing(int ping_sockfd, node_t *data_queue, struct sockaddr_in addrs[], i
         gettimeofday(&begin, 0);
         printf("--------new ping loop iteration--------\n");
         recvPing(ping_sockfd, &pckSend);
-        pckSend = prepPckt(pckSend, &pckSend.msg[RESPONSE_CONTENT_OFFSET], 36);
+        printf("finished receiving stuff\n");
+        char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
+        printf("chard2dataPkt finished...\n");
+        payload_len = dataPkt2char(pckVal, data_char);
+        pckSend = prepPckt(pckSend, data_char, payload_len);
         printf("prepped pck for sending \n");
         sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         usleep(1000000);
@@ -197,22 +195,21 @@ node_t* initialDataQueue(char* text){
     tmp_pkt.data = (char*) malloc(sizeof(char) * PKT_PAYLOAD_SIZE + 1);
     if(tmp_pkt.data == 0){
         printf("failed to allocate memory; \n");
+        return 0;
     }
-    printf("allocated mem for data\n");
-    while(text_len){
-        printf("-------------\n text_len: %i\n", text_len);
+    while(text_len > 0){
+        printf("-------------\ntext_len: %i\n", text_len);
         printf("current leftover payload: %s\n", text);
-        strcpsize = text_len >= PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE  : text_len ;
+        strcpsize =text_len >= PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE  : text_len;
         printf("strcpsize: %i\n", strcpsize);
     
-        strlcpy(tmp_pkt.data, text, strcpsize+1);
+        strncpy(tmp_pkt.data, text, strcpsize);
         printf("tmp_pkt.data: %s\n", tmp_pkt.data);
-        printf("strlen of copied text: %li \n", strlen(tmp_pkt.data));
         tmp_pkt.data_len = strcpsize;
         tmp_pkt.id = id++;
         enqueue(&head, tmp_pkt);
-        text_len -= strcpsize;
         text += strcpsize;
+        text_len = strlen(text);
     }
     return head;
 }

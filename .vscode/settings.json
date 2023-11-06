@@ -2,12 +2,15 @@
     "sonarlint.pathToCompileCommands": "${workspaceFolder}/compile_commands.json",
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
     "cSpell.words": [
+        "ahrensburg",
         "icmphdr",
         "pckt",
         "strcpsize"
     ],
     "files.associations": {
         "*.pl": "prolog",
-        "ip_icmp.h": "c"
+        "ip_icmp.h": "c",
+        "stdio.h": "c",
+        "in.h": "c"
     }
 }
