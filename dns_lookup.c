@@ -11,7 +11,7 @@
 
 
 extern char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con){
-    printf("\nResolving DNS..\n");
+    printf("Resolving DNS..\n");
     struct hostent *host_entity;
     char *ip=(char*)malloc(NI_MAXHOST*sizeof(char));
  
@@ -30,4 +30,12 @@ extern char *dns_lookup(char *addr_host, struct sockaddr_in *addr_con){
     (*addr_con).sin_addr.s_addr  = *(long*)host_entity->h_addr;
  
     return ip;  
+}
+
+extern void prepTargets (char *targets[], struct sockaddr_in* addrs, int targets_len){
+    char *ip_addrs[targets_len];
+    for(int i = 0; i < targets_len; i++){
+        ip_addrs[i] = dns_lookup(targets[i], &(addrs[i]));
+        printf("resolved %s to %s\n", targets[i], *(ip_addrs + i));
+    }
 }
