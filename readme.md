@@ -1,5 +1,7 @@
 ## Usage
 
+run `make piDB && ./piDB` in `sudo`-mode.
+
 write to the database: `write {your text}`
 the text is automatically distributed to more than one packet if required (only 33 data bytes per packet)
 to read from the database: `read {id}`
