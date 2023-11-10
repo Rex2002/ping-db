@@ -31,9 +31,14 @@
 
 int pingLoop = 1;
 int pck_id_counter = 0;
-pthread_mutex_t queue_lock;
+int readRequests[80];
+int readRequestNo = 0;
+pthread_mutex_t data_queue_lock;
+pthread_mutex_t resp_queue_lock;
+pthread_mutex_t read_request_lock;
 FILE *fp;
 node_t *data_queue_head = NULL;
+node_t *resp_queue_head = NULL;
 
 typedef struct ping_pkt{
     struct icmphdr hdr;
@@ -158,7 +163,7 @@ void recvPing(int ping_sockfd, packet *pck){
 void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
     packet pckSend;
     data_pkt pckVal;
-    int msg_count = 0;
+    int msg_count = 0, tmp_read_req_cnt;
     while((pckVal = dequeue(&data_queue_head)).data_len){
         fprintf(fp, "--------new dequeuing--------\n");
         fprintf(fp, "dequeued data: %s with size %i\n", pckVal.data, pckVal.data_len);
@@ -175,12 +180,25 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         fprintf(fp, "--------new ping loop iteration--------\n");
         recvPing(ping_sockfd, &pckSend);
         char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
-        
+        // add array that holds requested packets, if packet id is in that array, enqueue that packet to a response queue. 
+        // add array that holds arrays that are to be deleted, if packet id is in that array, do not resend the packet
+        // if id is in any array, remove id from array
         //enqueue(&data_queue, pckVal);
+        pthread_mutex_lock(&read_request_lock);
+        for(tmp_read_req_cnt = 0; tmp_read_req_cnt < readRequestNo; tmp_read_req_cnt++){
+            fprintf(stdout, "checking for id: %i, comparing with %i\n", readRequests[tmp_read_req_cnt], pckVal.id);
+            if(readRequests[tmp_read_req_cnt] == pckVal.id){
+                fprintf(stdout, "found packet %i: %s\n", pckVal.id, pckVal.data);
+                memmove(&readRequests[tmp_read_req_cnt], &readRequests[tmp_read_req_cnt+1], readRequestNo-(tmp_read_req_cnt+1));
+                readRequests[--readRequestNo] = 0;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&read_request_lock);
         pckSend = prepPckt(pckSend, pckVal);
         sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
 
-        pthread_mutex_lock(&queue_lock);
+        pthread_mutex_lock(&data_queue_lock);
         while((pckVal = dequeue(&data_queue_head)).data_len){
             fprintf(fp, "--------new dequeuing--------\n");
             fprintf(fp, "dequeued data: %s with size %i\n", pckVal.data, pckVal.data_len);
@@ -189,7 +207,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
             sendPing(ping_sockfd, &pckSend, addrs);
             msg_count++;
         }
-        pthread_mutex_unlock(&queue_lock);
+        pthread_mutex_unlock(&data_queue_lock);
         usleep(1000000);
         gettimeofday(&end, 0);
         fprintf(fp, "elapsed time: %f\n", (end.tv_sec - begin.tv_sec) + (end.tv_usec - begin.tv_usec) * 1e-6);
@@ -209,7 +227,7 @@ void fillDataQueue(char* text){
         fprintf(fp, "failed to allocate memory; \n");
         return;
     }
-    pthread_mutex_lock(&queue_lock);
+    pthread_mutex_lock(&data_queue_lock);
     while(text_len > 0){
         fprintf(fp, "-------------\ntext_len: %i\n", text_len);
         fprintf(fp, "current leftover payload: %s\n", text);
@@ -222,9 +240,47 @@ void fillDataQueue(char* text){
         text += strcpsize;
         text_len = strlen(text);
     }
-    pthread_mutex_unlock(&queue_lock);
+    pthread_mutex_unlock(&data_queue_lock);
     free(tmp_pkt.data);
     return;
+}
+
+void processUserInput(char *input, int str_size){
+    char cmd[8];
+    char str_id[4];
+    int id, pos, offset;
+    for(pos = 0; pos < str_size; pos++){
+        if(input[pos] == ' '){
+            break;
+        }
+        cmd[pos] = input[pos];
+    }
+    if(memcmp(cmd, "read", 4) == 0){
+        fprintf(stdout, "recognized read command\n");
+        //pos++;
+        for(offset = ++pos; pos < str_size; pos++){
+            if(input[pos] == ' '){
+                break;
+            }
+            printf("character: %c\n", input[pos]);
+            str_id[pos-offset] = input[pos];
+            printf("copied character: %c\n", str_id[0]);
+        }
+        str_id[pos-offset] = '\0';
+
+        id = atoi(str_id);
+        printf("extracted str_id: %s\n", str_id);
+        pthread_mutex_lock(&read_request_lock);
+        readRequests[readRequestNo] = id;
+        readRequestNo++;
+        pthread_mutex_unlock(&read_request_lock);
+    }else if(memcmp(cmd, "write", 5) == 0){
+        fillDataQueue(&input[pos+1]);
+        fprintf(stdout, "recognized write command\n");
+    }
+    else if(memcmp(cmd, "del", 3) == 0){
+        fprintf(stdout, "recognized del command\n");
+    }
 }
 
 void *handleUserInput(){
@@ -243,8 +299,11 @@ void *handleUserInput(){
             inputBuffer[num_chars - 1] = '\0';
             num_chars--;
         }
-        fillDataQueue(inputBuffer);
-        fprintf(fp, "read %li characters in input: %s", num_chars, inputBuffer);
+
+        //fillDataQueue(inputBuffer);
+        processUserInput(inputBuffer, num_chars);
+        fprintf(stdout, "\n");
+        //fprintf(fp, "read %li characters in input: %s", num_chars, inputBuffer);
     }
     free(inputBuffer);
     return NULL;
@@ -258,8 +317,11 @@ int main(){
     struct timeval tv_out;
 
 
-    if (pthread_mutex_init(&queue_lock, NULL) != 0) { 
+    if (pthread_mutex_init(&data_queue_lock, NULL) != 0 
+    || pthread_mutex_init(&resp_queue_lock, NULL) != 0
+    || pthread_mutex_init(&read_request_lock, NULL) != 0) { 
         fprintf(fp, "\n mutex init has failed\n"); 
+        strerror(errno);
         return 1; 
     } 
 
