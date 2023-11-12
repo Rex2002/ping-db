@@ -4,7 +4,7 @@
 #include <string.h>
 
 typedef struct data_pkt{
-    unsigned int id : 24;
+    unsigned int id : 16;
     int data_len;
     char *data;
 } data_pkt;
