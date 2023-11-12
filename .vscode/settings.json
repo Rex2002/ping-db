@@ -5,7 +5,8 @@
         "ahrensburg",
         "icmphdr",
         "pckt",
-        "strcpsize"
+        "strcpsize",
+        "updt"
     ],
     "files.associations": {
         "*.pl": "prolog",

@@ -48,10 +48,12 @@ int readRequests[80];
 int readRequestNo = 0;
 pthread_mutex_t data_queue_lock;
 pthread_mutex_t resp_queue_lock;
+pthread_mutex_t updt_queue_lock;
 pthread_mutex_t read_request_lock;
 FILE *fp;
 node_t *data_queue_head = NULL;
 node_t *resp_queue_head = NULL;
+node_t *updt_queue_head = NULL;
 word_t index_packets[8];
 
 
@@ -199,7 +201,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
                 // if a wanted packet is found, its put to the response queue;
                 pthread_mutex_lock(&resp_queue_lock);
                 enqueue(&resp_queue_head, pckVal);
-                pthread_mutex_unlock(&resp_queue_head);
+                pthread_mutex_unlock(&resp_queue_lock);
                 fprintf(stdout, "found packet %i: %s\n", pckVal.id, pckVal.data);
                 memmove(&readRequests[tmp_read_req_cnt], &readRequests[tmp_read_req_cnt+1], readRequestNo-(tmp_read_req_cnt+1));
                 readRequests[--readRequestNo] = 0;
@@ -207,7 +209,15 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
             }
         }
         pthread_mutex_unlock(&read_request_lock);
-        pckSend = prepPckt(pckSend, pckVal);
+        pthread_mutex_lock(&updt_queue_lock);
+        // todo think about what happens when id zero needs to be handled
+        if(updt_queue_head->val.id == pckVal.id){
+            pckSend = prepPckt(pckSend, dequeue(&updt_queue_head));
+        }
+        else{
+            pckSend = prepPckt(pckSend, pckVal);
+        }
+        pthread_mutex_unlock(&updt_queue_lock);
         sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
 
         pthread_mutex_lock(&data_queue_lock);
@@ -215,8 +225,8 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
             fprintf(fp, "--------new dequeuing--------\n");
             fprintf(fp, "dequeued data: %s with size %i\n", pckVal.data, pckVal.data_len);
             pckSend = prepPckt(pckSend, pckVal);
-            free(pckVal.data);
             sendPing(ping_sockfd, &pckSend, addrs);
+            free(pckVal.data);
             msg_count++;
         }
         pthread_mutex_unlock(&data_queue_lock);
@@ -225,6 +235,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         fprintf(fp, "elapsed time: %f\n", (end.tv_sec - begin.tv_sec) + (end.tv_usec - begin.tv_usec) * 1e-6);
         fflush(fp);
         usleep(1000000);
+        free(pckVal.data);
     }
 }
 
@@ -242,17 +253,21 @@ void createPacket(int id, char* data, int content_len){
 
 // method to update an existing packet with given id and data
 void updatePacket(int id, data_pkt data){
-
+    data.id = id;
+    pthread_mutex_lock(&updt_queue_lock);
+    enqueue(&updt_queue_head, data);
+    pthread_mutex_unlock(&updt_queue_lock);
 }
 
 // method used to create a new index packet where the 0th index is set to 1;
 void createIndexPacket(int idx_id){
-
+    char data = (char) 0 | (char) 0x80;
+    createPacket(idx_id, &data, 1);
 }
 
 int getNextId(){
     int id = -1;
-    int index_pck_id = 0;
+    int index_pck_id = 1;
     int smallest_empty_index_pck = -1;
     data_pkt pck;
     // checking if an index packet that has "space" for another packet exists (i.e. is not 255 at each byte)
