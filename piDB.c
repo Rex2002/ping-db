@@ -41,6 +41,7 @@
 #define FIRST_DATA_PKT_ID 241
 #define PORT_NO 0 
 #define RECV_TIMEOUT 1 
+#define BMASK   (1 << (CHAR_BIT-1))
 
 int pingLoop = 1;
 int pck_id_counter = 0;
@@ -91,33 +92,52 @@ unsigned short checksum(void *b, int len)
     return result;
 }
 
+void printbits (char value) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        printf("%d", !!((value << i) & 0x80));
+    }
+    printf("\n");
+}
+
+int checkBit(char value, int bitNo){
+    if(bitNo > 7) {
+        printf(stdout, "something went really wrong...\n");
+        return 0;
+    }
+    printbits(value);
+    for(int i = 0; i < 8; i++){
+        if(i == bitNo) return ((value << i) & 0x80);
+    }
+    return 0;
+}
+
 int dataPkt2char(data_pkt pkt, char *out_buf){
     unsigned char id1 = (pkt.id >> (8*0)) & 0xff;
     unsigned char id2 = (pkt.id >> (8*1)) & 0xff;
     out_buf[0] = id1;
     out_buf[1] = id2;
-    fprintf(stdout, "decoded pckt id to %i, %i\n", id1, id2);
     if(pkt.data_len > PING_PKT_PAYLOAD_SIZE - PKT_ID_SIZE){
         fprintf(fp, "invalid data packet detected: %s\n", pkt.data);
         out_buf[PKT_ID_SIZE] = 0;
         return PKT_ID_SIZE;
     }
-    fprintf(fp, "id1: %i, %i, payload: %s \n", id1, id2, pkt.data);
+    fprintf(fp, "id: %i-%i, payload: %s \n", id1, id2, pkt.data);
     int i;
     for(i = 0; i < pkt.data_len; i++){
         out_buf[i+PKT_ID_SIZE] = pkt.data[i];
     }
-    //fprintf(fp, "outbuf %s\n", &out_buf[3]);
     return i+PKT_ID_SIZE;
 }
 
 void char2dataPkt(char *in, data_pkt* pkt){
     pkt->id = in[0] | in[1] << (8*1);
     fprintf(fp, "decrypted id: %i\n", pkt->id);
-    fflush(fp);
     // todo maybe redo that
     pkt->data_len = strlen(&in[PKT_ID_SIZE]) > PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE : strlen(&in[PKT_ID_SIZE]);
+    fprintf(fp, "datalen: %i\n", pkt->data_len);
     pkt->data = strdup(in+PKT_ID_SIZE);
+    fflush(fp);
 }
 
 void printPcktMsg(char* msg, int size){
@@ -197,9 +217,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         if (!(pckSend.hdr.type == 69 && pckSend.hdr.code == 0)) {
             //fprintf(stdout, " Error..Packet received with ICMP type % d code % d\n", pckSend.hdr.type, pckSend.hdr.code);
         }
-        else{
-            fprintf(stdout, "received ping pkt\n");
-            
+        else{            
             char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
             // add array that holds requested packets, if packet id is in that array, enqueue that packet to a response queue. 
             // add array that holds arrays that are to be deleted, if packet id is in that array, do not resend the packet
@@ -250,8 +268,6 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
     }
 }
 
-
-
 void createPacket(int id, char* data, int content_len){
     data_pkt pkt;
     pkt.data = data;
@@ -273,6 +289,7 @@ void updatePacket(int id, data_pkt data){
 // method used to create a new index packet where the 0th index is set to 1;
 void createIndexPacket(int idx_id){
     printf("creating index packet with id: %i\n", idx_id );
+    set_bit(index_packets, idx_id);
     char data = (char) 0 | (char) 0x80;
     createPacket(idx_id, &data, 1);
 }
@@ -292,15 +309,17 @@ int getNextId(){
             readRequests[readRequestNo] = index_pck_id;
             readRequestNo++;
             pthread_mutex_unlock(&read_request_lock);
-            while(!(pck = dequeue(&resp_queue_head)).data_len){
+            while(1){
                 pthread_mutex_lock(&resp_queue_lock);
-                pck = dequeue(&resp_queue_head);
-                pthread_mutex_unlock(&resp_queue_lock);
-                if(pck.data_len || pck.id){
+                if(resp_queue_head && (resp_queue_head->val.data_len || resp_queue_head->val.id)){
                     break;
                 }
+                pthread_mutex_unlock(&resp_queue_lock);
                 usleep(1000000);
             }
+            pck = dequeue(&resp_queue_head);
+            pthread_mutex_unlock(&resp_queue_lock);
+
             for(unsigned char k = 0; k < pck.data_len; k ++){
                 if(pck.data[k] != -127){
                     for(id = 0; id<8; id++){
@@ -319,7 +338,6 @@ int getNextId(){
             }
         }
         else if(smallest_empty_index_pck == -1){
-            fprintf(stdout, "set smallest empty index packet to %i", index_pck_id);
             smallest_empty_index_pck = index_pck_id;
         }
     }
@@ -346,7 +364,6 @@ void writePacket(char *content, int content_len){
     fprintf(stdout, "acquired packet id %i, writing content %.*s\n", id, content_len, content);
     createPacket(id, content, content_len);
 }
-
 
 void fillDataQueue(char* data){
     fprintf(fp, "filling data queue with: %s \n", data);
@@ -377,6 +394,61 @@ void fillDataQueue(char* data){
     return;
 }
 
+int checkPacketId(int packetId){
+    data_pkt pck;
+    int idx_pckt_id = packetId/(PKT_PAYLOAD_SIZE * 8);
+    if(!get_bit(index_packets, idx_pckt_id)){
+        return 0;
+    }
+    fprintf(stdout, "searching for index packet %i\n", idx_pckt_id);
+    pthread_mutex_lock(&read_request_lock);
+    readRequests[readRequestNo] = idx_pckt_id;
+    readRequestNo++;
+    pthread_mutex_unlock(&read_request_lock);
+    while(1){
+        pthread_mutex_lock(&resp_queue_lock);
+        if(resp_queue_head && (resp_queue_head->val.data_len || resp_queue_head->val.id)){
+            break;
+        }
+        pthread_mutex_unlock(&resp_queue_lock);
+        usleep(1000000);
+    }
+    pck = dequeue(&resp_queue_head);
+    pthread_mutex_unlock(&resp_queue_lock);
+    fprintf(stdout, "starting to print idx packet: \n");
+    fprintf(stdout, "idx pck length: %i, index packet id: %i \n", pck.data_len, pck.id);
+    int byteNo = (packetId%34)/8;
+    int bitNo = packetId%(34*8);
+    if(byteNo >= pck.data_len) return 0;
+    int ret = checkBit(pck.data[byteNo], bitNo);
+    free(pck.data);
+    pck.id = 0; pck.data_len = 0;
+    return ret;
+    
+}
+
+void readPacket(int packetId){
+    if(!checkPacketId(packetId)){
+        fprintf(stdout, "the packet %i does not exist\n", packetId);
+        return;
+    }    
+    pthread_mutex_lock(&read_request_lock);
+    readRequests[readRequestNo] = packetId;
+    readRequestNo++;
+    pthread_mutex_unlock(&read_request_lock);
+    while(1){
+        pthread_mutex_lock(&resp_queue_lock);
+        if(resp_queue_head && (resp_queue_head->val.data_len || resp_queue_head->val.id)){
+            break;
+        }
+        pthread_mutex_unlock(&resp_queue_lock);
+        usleep(1000000);
+    }
+    dequeue(&resp_queue_head);
+    fprintf(stdout, "packet content should have been printed above\n");
+    pthread_mutex_unlock(&resp_queue_lock);
+
+}
 
 void processUserInput(char *input, int str_size){
     char cmd[8];
@@ -399,13 +471,7 @@ void processUserInput(char *input, int str_size){
         str_id[pos-offset] = '\0';
 
         id = atoi(str_id);
-        if(!get_bit(index_packets, id/(PKT_PAYLOAD_SIZE * 8))){
-            fprintf(stdout, "the requested packet %i is not present", id);
-        }
-        pthread_mutex_lock(&read_request_lock);
-        readRequests[readRequestNo] = id;
-        readRequestNo++;
-        pthread_mutex_unlock(&read_request_lock);
+        readPacket(id);
     }else if(memcmp(cmd, "write", 5) == 0){
         //writePacket(&input[pos+1]);
         fprintf(stdout, "recognized write command\n");
