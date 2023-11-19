@@ -70,6 +70,7 @@ struct handleInputParameter{
 void intHandler(int dummy)
 {
     fprintf(fp, "int handler called with dummy: %i \n", dummy);
+    fflush(fp);
     pingLoop=0;
 }
 
@@ -91,10 +92,11 @@ unsigned short checksum(void *b, int len)
 }
 
 int dataPkt2char(data_pkt pkt, char *out_buf){
-    char id1 = (pkt.id >> (8*0)) & 0xff;
-    char id2 = (pkt.id >> (8*1)) & 0xff;
+    unsigned char id1 = (pkt.id >> (8*0)) & 0xff;
+    unsigned char id2 = (pkt.id >> (8*1)) & 0xff;
     out_buf[0] = id1;
     out_buf[1] = id2;
+    fprintf(stdout, "decoded pckt id to %i, %i\n", id1, id2);
     if(pkt.data_len > PING_PKT_PAYLOAD_SIZE - PKT_ID_SIZE){
         fprintf(fp, "invalid data packet detected: %s\n", pkt.data);
         out_buf[PKT_ID_SIZE] = 0;
@@ -112,6 +114,7 @@ int dataPkt2char(data_pkt pkt, char *out_buf){
 void char2dataPkt(char *in, data_pkt* pkt){
     pkt->id = in[0] | in[1] << (8*1);
     fprintf(fp, "decrypted id: %i\n", pkt->id);
+    fflush(fp);
     // todo maybe redo that
     pkt->data_len = strlen(&in[PKT_ID_SIZE]) > PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE : strlen(&in[PKT_ID_SIZE]);
     pkt->data = strdup(in+PKT_ID_SIZE);
@@ -162,7 +165,7 @@ void recvPing(int ping_sockfd, packet *pck){
     struct sockaddr_in r_addr;
     unsigned int addr_len = sizeof(r_addr);
     if(recvfrom(ping_sockfd, pck, sizeof(*pck), 0, (struct sockaddr*)&r_addr, &addr_len) <= 0){
-        fprintf(fp, "failed to receive packet \n");
+        fprintf(fp, "failed to receive packet. Probably recv timeout \n");
         fprintf(fp, "errno: %s\n", strerror(errno));
         return;
     }
@@ -173,6 +176,7 @@ void recvPing(int ping_sockfd, packet *pck){
 }
 
 void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
+    fprintf(stdout, "entering pongPing \n");
     packet pckSend;
     data_pkt pckVal;
     int msg_count = 0, tmp_read_req_cnt;
@@ -184,42 +188,49 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         sendPing(ping_sockfd, &pckSend, addrs);
         msg_count++;
     }
+    fprintf(stdout, "finished dequeuing stuff\n");
     struct timeval begin, end;
     while(pingLoop){
         gettimeofday(&begin, 0);
         fprintf(fp, "--------new ping loop iteration--------\n");
         recvPing(ping_sockfd, &pckSend);
-        char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
-        // add array that holds requested packets, if packet id is in that array, enqueue that packet to a response queue. 
-        // add array that holds arrays that are to be deleted, if packet id is in that array, do not resend the packet
-        // if id is in any array, remove id from array
-        //enqueue(&data_queue, pckVal);
-        pthread_mutex_lock(&read_request_lock);
-        for(tmp_read_req_cnt = 0; tmp_read_req_cnt < readRequestNo; tmp_read_req_cnt++){
-            fprintf(stdout, "checking for id: %i, comparing with %i\n", readRequests[tmp_read_req_cnt], pckVal.id);
-            if(readRequests[tmp_read_req_cnt] == pckVal.id){
-                // if a wanted packet is found, its put to the response queue;
-                pthread_mutex_lock(&resp_queue_lock);
-                enqueue(&resp_queue_head, pckVal);
-                pthread_mutex_unlock(&resp_queue_lock);
-                fprintf(stdout, "found packet %i: %s\n", pckVal.id, pckVal.data);
-                memmove(&readRequests[tmp_read_req_cnt], &readRequests[tmp_read_req_cnt+1], readRequestNo-(tmp_read_req_cnt+1));
-                readRequests[--readRequestNo] = 0;
-                break;
-            }
-        }
-        pthread_mutex_unlock(&read_request_lock);
-        pthread_mutex_lock(&updt_queue_lock);
-        // todo think about what happens when id zero needs to be handled
-        if(updt_queue_head->val.id == pckVal.id){
-            pckSend = prepPckt(pckSend, dequeue(&updt_queue_head));
+        if (!(pckSend.hdr.type == 69 && pckSend.hdr.code == 0)) {
+            //fprintf(stdout, " Error..Packet received with ICMP type % d code % d\n", pckSend.hdr.type, pckSend.hdr.code);
         }
         else{
-            pckSend = prepPckt(pckSend, pckVal);
+            fprintf(stdout, "received ping pkt\n");
+            
+            char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
+            // add array that holds requested packets, if packet id is in that array, enqueue that packet to a response queue. 
+            // add array that holds arrays that are to be deleted, if packet id is in that array, do not resend the packet
+            // if id is in any array, remove id from array
+            //enqueue(&data_queue, pckVal);
+            pthread_mutex_lock(&read_request_lock);
+            for(tmp_read_req_cnt = 0; tmp_read_req_cnt < readRequestNo; tmp_read_req_cnt++){
+                fprintf(stdout, "checking for id: %i, comparing with %i\n", readRequests[tmp_read_req_cnt], pckVal.id);
+                if(readRequests[tmp_read_req_cnt] == pckVal.id){
+                    // if a wanted packet is found, its put to the response queue;
+                    pthread_mutex_lock(&resp_queue_lock);
+                    enqueue(&resp_queue_head, pckVal);
+                    pthread_mutex_unlock(&resp_queue_lock);
+                    fprintf(stdout, "found packet %i: %s\n", pckVal.id, pckVal.data);
+                    memmove(&readRequests[tmp_read_req_cnt], &readRequests[tmp_read_req_cnt+1], readRequestNo-(tmp_read_req_cnt+1));
+                    readRequests[--readRequestNo] = 0;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&read_request_lock);
+            pthread_mutex_lock(&updt_queue_lock);
+            // todo think about what happens when id zero needs to be handled
+            if(updt_queue_head != 0 && updt_queue_head->val.id == pckVal.id){
+                pckSend = prepPckt(pckSend, dequeue(&updt_queue_head));
+            }
+            else{
+                pckSend = prepPckt(pckSend, pckVal);
+            }
+            pthread_mutex_unlock(&updt_queue_lock);
+            sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         }
-        pthread_mutex_unlock(&updt_queue_lock);
-        sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
-
         pthread_mutex_lock(&data_queue_lock);
         while((pckVal = dequeue(&data_queue_head)).data_len){
             fprintf(fp, "--------new dequeuing--------\n");
@@ -235,7 +246,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         fprintf(fp, "elapsed time: %f\n", (end.tv_sec - begin.tv_sec) + (end.tv_usec - begin.tv_usec) * 1e-6);
         fflush(fp);
         usleep(1000000);
-        free(pckVal.data);
+        //free(pckVal.data);
     }
 }
 
@@ -261,6 +272,7 @@ void updatePacket(int id, data_pkt data){
 
 // method used to create a new index packet where the 0th index is set to 1;
 void createIndexPacket(int idx_id){
+    printf("creating index packet with id: %i\n", idx_id );
     char data = (char) 0 | (char) 0x80;
     createPacket(idx_id, &data, 1);
 }
@@ -275,6 +287,7 @@ int getNextId(){
         // check if index packet no. index_pck_id exists
         // if so, load the packet and check, if there is a byte that is not "full"
         if(get_bit(index_packets, index_pck_id)){
+            fprintf(stdout, "bit %i is present\n", index_pck_id);
             pthread_mutex_lock(&read_request_lock);
             readRequests[readRequestNo] = index_pck_id;
             readRequestNo++;
@@ -306,6 +319,7 @@ int getNextId(){
             }
         }
         else if(smallest_empty_index_pck == -1){
+            fprintf(stdout, "set smallest empty index packet to %i", index_pck_id);
             smallest_empty_index_pck = index_pck_id;
         }
     }
@@ -313,9 +327,9 @@ int getNextId(){
         updatePacket(index_pck_id, pck);
         return id;
     }
-    else if (smallest_empty_index_pck!= -1){
+    else if (smallest_empty_index_pck != -1){
         id = smallest_empty_index_pck*8*PKT_PAYLOAD_SIZE;
-        createIndexPacket(index_pck_id);
+        createIndexPacket(smallest_empty_index_pck);
         return id;
     }
     else {
@@ -329,6 +343,7 @@ void writePacket(char *content, int content_len){
         fprintf(stdout, "could not write packet %i. Database is full", id);
         return;
     }
+    fprintf(stdout, "acquired packet id %i, writing content %.*s\n", id, content_len, content);
     createPacket(id, content, content_len);
 }
 
@@ -344,13 +359,15 @@ void fillDataQueue(char* data){
         return;
     }
     //pthread_mutex_lock(&data_queue_lock);
+    char toWrite[PKT_PAYLOAD_SIZE];
     while(data_len > 0){
         strcpsize = data_len >= PKT_PAYLOAD_SIZE ? PKT_PAYLOAD_SIZE  : data_len;
     
         //strncpy(tmp_pkt.data, data, strcpsize);
         //tmp_pkt.data_len = strcpsize;
         //tmp_pkt.id = pck_id_counter++;
-        writePacket(data, strcpsize);
+        strncpy(toWrite, data, strcpsize);
+        writePacket(toWrite, strcpsize);
         //enqueue(&data_queue_head, tmp_pkt);
         data += strcpsize;
         data_len = strlen(data);
@@ -391,8 +408,8 @@ void processUserInput(char *input, int str_size){
         pthread_mutex_unlock(&read_request_lock);
     }else if(memcmp(cmd, "write", 5) == 0){
         //writePacket(&input[pos+1]);
-        fillDataQueue(&input[pos+1]);
         fprintf(stdout, "recognized write command\n");
+        fillDataQueue(&input[pos+1]);
     }
     else if(memcmp(cmd, "del", 3) == 0){
         fprintf(stdout, "recognized del command\n");
@@ -441,17 +458,17 @@ int main(){
     } 
 
     char* data_text = "this is a long text with more than 34 letters please be long";
-    fillDataQueue(data_text);
+    //fillDataQueue(data_text);
 
 
     pthread_t inputThread;
     pthread_create(&inputThread, NULL, handleUserInput, NULL);
 
-    char *targets[] = {"localhost", "yahoo.com", "google.com", "ekg-ahrensburg.de"}; 
+    char *targets[] = {"localhost"};//, "yahoo.com", "google.com", "ekg-ahrensburg.de"}; 
     int targets_len = sizeof(targets)/sizeof(targets[0]);
     struct sockaddr_in addr_cons[targets_len];
     prepTargets(targets, addr_cons, targets_len);
-
+    
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if(sockfd < 0){
         fprintf(fp, "failed to receive socket file descriptor\n");
@@ -476,7 +493,7 @@ int main(){
                    (const char*)&tv_out, sizeof tv_out);
 
 
-
+    fflush(fp);
     pongPing(sockfd, addr_cons, targets_len);
     exit(0);
 }
