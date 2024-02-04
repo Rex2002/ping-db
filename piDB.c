@@ -214,10 +214,11 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
         gettimeofday(&begin, 0);
         fprintf(fp, "--------new ping loop iteration--------\n");
         recvPing(ping_sockfd, &pckSend);
-        if (!(pckSend.hdr.type == 69 && pckSend.hdr.code == 0)) {
+        printf(stdout, "header type: %i", pckSend.hdr.type);
+        if (!(pckSend.hdr.type == 69 && pckSend.hdr.code == 0) || pckSend.hdr.un.echo.sequence == 64) {
             //fprintf(stdout, " Error..Packet received with ICMP type % d code % d\n", pckSend.hdr.type, pckSend.hdr.code);
         }
-        else{            
+        else{
             char2dataPkt(&pckSend.msg[RESPONSE_CONTENT_OFFSET], &pckVal);
             // add array that holds requested packets, if packet id is in that array, enqueue that packet to a response queue. 
             // add array that holds arrays that are to be deleted, if packet id is in that array, do not resend the packet
@@ -247,6 +248,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
                 pckSend = prepPckt(pckSend, pckVal);
             }
             pthread_mutex_unlock(&updt_queue_lock);
+            fprintf(stdout, "pinged ping with id %i\n", pckVal.id);
             sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         }
         pthread_mutex_lock(&data_queue_lock);
@@ -323,8 +325,10 @@ int getNextId(){
             for(unsigned char k = 0; k < pck.data_len; k ++){
                 if(pck.data[k] != -127){
                     for(id = 0; id<8; id++){
-                        if(pck.data[k] & (1 << id)){
-                            pck.data[k] = pck.data[k] | (1 << id);
+                        if(pck.data[k] & (1 << (7 - id))) fprintf(stdout, "1\n"); 
+                        else fprintf(stdout, "0\n");
+                        if(!(pck.data[k] & (1 << (7 - id)))){
+                            pck.data[k] = pck.data[k] | (1 << ( 7 -id) );
                             break;
                         }
                     }
