@@ -47,10 +47,13 @@ int pingLoop = 1;
 int pck_id_counter = 0;
 int readRequests[80];
 int readRequestNo = 0;
+int delRequests[80];
+int delRequestNo = 0;
 pthread_mutex_t data_queue_lock;
 pthread_mutex_t resp_queue_lock;
 pthread_mutex_t updt_queue_lock;
 pthread_mutex_t read_request_lock;
+pthread_mutex_t del_request_lock;
 FILE *fp;
 node_t *data_queue_head = NULL;
 node_t *resp_queue_head = NULL;
@@ -199,7 +202,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
     fprintf(stdout, "entering pongPing \n");
     packet pckSend;
     data_pkt pckVal;
-    int msg_count = 0, tmp_read_req_cnt;
+    int msg_count = 0, tmp_read_req_cnt, tmp_del_req_cnt, resend_pck;
     while((pckVal = dequeue(&data_queue_head)).data_len){
         fprintf(fp, "--------new dequeuing--------\n");
         fprintf(fp, "dequeued data: %s with size %i\n", pckVal.data, pckVal.data_len);
@@ -213,8 +216,8 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
     while(pingLoop){
         gettimeofday(&begin, 0);
         fprintf(fp, "--------new ping loop iteration--------\n");
+        resend_pck = 1;
         recvPing(ping_sockfd, &pckSend);
-        printf(stdout, "header type: %i", pckSend.hdr.type);
         if (!(pckSend.hdr.type == 69 && pckSend.hdr.code == 0) || pckSend.hdr.un.echo.sequence == 64) {
             //fprintf(stdout, " Error..Packet received with ICMP type % d code % d\n", pckSend.hdr.type, pckSend.hdr.code);
         }
@@ -239,6 +242,21 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
                 }
             }
             pthread_mutex_unlock(&read_request_lock);
+            // handle delete requests
+            pthread_mutex_lock(&del_request_lock);
+            for(tmp_del_req_cnt = 0; tmp_del_req_cnt < delRequestNo; tmp_del_req_cnt++){
+                fprintf(stdout, "checking for id: %i, comparing with %i\n", delRequests[tmp_del_req_cnt], pckVal.id);
+                if(delRequests[tmp_del_req_cnt] == pckVal.id){
+                    // if a wanted packet is found, its put to the response queue;
+                    resend_pck = 0;
+                    fprintf(stdout, "found packet %i: %s\n", pckVal.id, pckVal.data);
+                    memmove(&delRequests[tmp_del_req_cnt], &delRequests[tmp_del_req_cnt+1], delRequestNo-(tmp_del_req_cnt+1));
+                    delRequests[--delRequestNo] = 0;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&del_request_lock);
+            
             pthread_mutex_lock(&updt_queue_lock);
             // todo think about what happens when id zero needs to be handled
             if(updt_queue_head != 0 && updt_queue_head->val.id == pckVal.id){
@@ -249,7 +267,7 @@ void pongPing(int ping_sockfd, struct sockaddr_in addrs[], int addrs_len){
             }
             pthread_mutex_unlock(&updt_queue_lock);
             fprintf(stdout, "pinged ping with id %i\n", pckVal.id);
-            sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
+            if(resend_pck) sendPing(ping_sockfd, &pckSend, &addrs[rand()%addrs_len]);
         }
         pthread_mutex_lock(&data_queue_lock);
         while((pckVal = dequeue(&data_queue_head)).data_len){
@@ -357,6 +375,49 @@ int getNextId(){
     else {
         return -1;
     }  
+}
+
+void deleteId(int packetId){
+    data_pkt pck;
+    int idx_pckt_id = packetId/(PKT_PAYLOAD_SIZE * 8);
+    if(!get_bit(index_packets, idx_pckt_id)){
+        return;
+    }
+    fprintf(stdout, "searching for index packet %i to delete id\n", idx_pckt_id);
+    pthread_mutex_lock(&read_request_lock);
+    readRequests[readRequestNo] = idx_pckt_id;
+    readRequestNo++;
+    pthread_mutex_unlock(&read_request_lock);
+    while(1){
+        pthread_mutex_lock(&resp_queue_lock);
+        if(resp_queue_head && (resp_queue_head->val.data_len || resp_queue_head->val.id)){
+            break;
+        }
+        pthread_mutex_unlock(&resp_queue_lock);
+        usleep(1000000);
+    }
+    pck = dequeue(&resp_queue_head);
+    pthread_mutex_unlock(&resp_queue_lock);
+    fprintf(stdout, "found idx packet %i to delete id %i \n", idx_pckt_id, packetId);
+    fprintf(stdout, "idx pck length: %i, index packet id: %i \n", pck.data_len, pck.id);
+    int byteNo = (packetId%34)/8;
+    int bitNo = packetId%(34*8);
+    fprintf(stdout, "byteNo: %i, bitNo: %i\n", byteNo, bitNo);
+    for( int id = 0; id<8; id++){
+        if(pck.data[0] & (1 << (7 - id))) fprintf(stdout, "1"); 
+        else fprintf(stdout, "0");
+    }
+    fprintf(stdout, "\n");
+    if(byteNo >= pck.data_len) return;
+    pck.data[byteNo] &= ~(1 << (7-bitNo));
+    for( int id = 0; id<8; id++){
+        if(pck.data[0] & (1 << (7 - id))) fprintf(stdout, "1"); 
+        else fprintf(stdout, "0");
+    }
+    //int ret = checkBit(pck.data[byteNo], bitNo);
+    updatePacket(idx_pckt_id, pck);
+    //free(pck.data);
+    //pck.id = 0; pck.data_len = 0;
 }
 
 void writePacket(char *content, int content_len){
@@ -482,7 +543,21 @@ void processUserInput(char *input, int str_size){
         fillDataQueue(&input[pos+1]);
     }
     else if(memcmp(cmd, "del", 3) == 0){
-        fprintf(stdout, "recognized del command\n");
+        for(offset = ++pos; pos < str_size; pos++){
+            if(input[pos] == ' '){
+                break;
+            }
+            str_id[pos-offset] = input[pos];
+        }
+        str_id[pos-offset] = '\0';
+        id = atoi(str_id);
+        fprintf(stdout, "recognized del command for id %i\n", id);
+
+        pthread_mutex_lock(&del_request_lock);
+        delRequests[delRequestNo] = id;
+        delRequestNo++;
+        pthread_mutex_unlock(&del_request_lock); 
+        deleteId(id);
     }
 }
 
@@ -503,7 +578,6 @@ void *handleUserInput(){
             num_chars--;
         }
 
-        //fillDataQueue(inputBuffer);
         processUserInput(inputBuffer, num_chars);
         //fprintf(fp, "read %li characters in input: %s", num_chars, inputBuffer);
     }
@@ -521,7 +595,8 @@ int main(){
 
     if (pthread_mutex_init(&data_queue_lock, NULL) != 0 
     || pthread_mutex_init(&resp_queue_lock, NULL) != 0
-    || pthread_mutex_init(&read_request_lock, NULL) != 0) { 
+    || pthread_mutex_init(&read_request_lock, NULL) != 0
+    || pthread_mutex_init(&del_request_lock, NULL) != 0) { 
         fprintf(fp, "\n mutex init has failed\n"); 
         strerror(errno);
         return 1; 
